@@ -25,11 +25,15 @@ namespace vcf {
 	namespace ascii = boost::spirit::ascii;
 	namespace ph = boost::phoenix;
 
+	//FIXME Reader assumes all data lies on one chromosome
+
 	class Reader {
 
 	public:
 
-		Reader(int window=0, int capacity=0) {
+		Reader(int window=0, bool fixed_win=false, int capacity=0)
+			: fixed_window(fixed_win)
+		{
 			if (capacity > 0) {
 				chromosomes.reserve(capacity);
 				positions.reserve(capacity);
@@ -63,6 +67,7 @@ namespace vcf {
 		
 			// read in data
 			size_t w = 0;
+			// N.B. w has different meanings, contingent on fixed_window
 			while (true) {
 				getline(file, line);
 				if (file.eof()) break;
@@ -82,14 +87,59 @@ namespace vcf {
 				parse_end = find_nth_of(line, delim, 1, parse_start+1);
 				parse_depth(line.begin() + parse_start, line.begin() + parse_end);
 
-				if (++w >= window) {
-					// completed reading a window of data: summarize data
-					summarize_data();
-					w = 0;
+				if (fixed_window) {
+					// window size is fixed based on genomic coordinate: increment by the number of bp covered
+					// N.B. one extra value from the next window will be summarized in the current window
+					// w is index of the current window
+					// check if the current position is greater than the limit of the current window
+					if (win_positions.back() >= (w+1) * window) {
+						// newly added data spills into the next window: summarize all elements in previous window
+
+						// store the new element
+						unsigned long position = win_positions.back();
+						int chromosome = win_chromosomes.back();
+						int value = win_values.back();
+
+						// pop new element off the vector, temporarily
+						win_positions.pop_back();
+						win_chromosomes.pop_back();
+						win_values.pop_back();
+
+						summarize_data_fixed_window(chromosome, w*window + window/2);
+						++w;
+
+						// fast forward to the window containing the new element, summarizing data as necessary
+						// each window spans [start_w, end_w)
+						while( position >= (w+1) * window ) {
+							summarize_data_fixed_window(chromosome, w*window + window/2);
+							++w;
+						}
+
+						// push new element back onto the vector
+						win_positions.push_back(position);
+						win_chromosomes.push_back(chromosome);
+						win_values.push_back(value);
+					}
+				} else {
+					// w is a counter that represents number of elements accumulated in the current window
+					// window size is based on cardinality of elements: increment counter by one element
+					if (++w >= window) {
+						// completed reading a window of data: summarize data
+						summarize_data();
+						w = 0;
+					}
 				}
+
 			}
+
 			// summarize the last partial window, if any
-			summarize_data();
+			if (fixed_window) {
+				if (win_chromosomes.size() > 0) {
+					summarize_data_fixed_window(win_chromosomes.front(), w*window + window/2);
+				}
+			} else {
+				summarize_data();
+			}
 
 			// sanity check
 			size = chromosomes.size();
@@ -167,6 +217,30 @@ namespace vcf {
 			return k;
 		}
 
+		// summarize data for current fixed window centered at given coordinates
+		void summarize_data_fixed_window(int chromosome, unsigned long position) {
+			if (win_values.size() == 0) {
+				// window vectors is empty
+				// add place-holder
+				chromosomes.push_back( chromosome );
+				positions.push_back( position );
+				values.push_back( 0 );
+			} else {
+				// use the median to represent the data at the midpoint of the window	
+				int median = algo::median( win_values.data(), win_values.size() );
+
+				// push summarized data onto storing vectors
+				chromosomes.push_back( chromosome );
+				positions.push_back( position );
+				values.push_back( median );
+
+				// clear window vectors
+				win_chromosomes.clear();
+				win_positions.clear();
+				win_values.clear();
+			}
+		}
+
 		// summarize data and push onto storage vectors
 		void summarize_data() {
 			// window vector is empty: nothing to do
@@ -174,7 +248,7 @@ namespace vcf {
 
 			// use the median to represent the data at the midpoint of the window	
 			int median = algo::median( win_values.data(), win_values.size() );
-			size_t middle = window / 2;
+			size_t middle = win_values.size() / 2;
 
 			// push summarized data onto storing vectors
 			chromosomes.push_back( win_chromosomes[middle] );
@@ -190,15 +264,17 @@ namespace vcf {
 
 		// data within a window (temporary)
 		vector<int> win_chromosomes;
-		vector<long> win_positions;
+		vector<unsigned long> win_positions;
 		vector<int> win_values;
 
 		// stored data (possibly downsampled)
 		vector<int> chromosomes;
-		vector<long> positions;
+		vector<unsigned long> positions;
 		vector<int> values;
 
 		size_t size, window;
+
+		bool fixed_window;
 
 	};
 
@@ -214,7 +290,9 @@ int main(int argc, char *argv[]) {
 	po::positional_options_description popts;
 
 	string input_fname, output_fname;
-	int window, length;
+	int window;
+	size_t length;
+	bool fixed_window;
 
 	// setup command line options
 
@@ -223,7 +301,8 @@ int main(int argc, char *argv[]) {
 		("input,i", po::value<string>(), "input file")
 		("output,o", po::value<string>(&output_fname), "output file")
 		("window,w", po::value<int>(&window)->default_value(0), "summarization window size")
-		("length,l", po::value<int>(&length)->default_value(1e6), "expected length of the values array")
+		("fixed,f", po::value<bool>(&fixed_window)->default_value(true), "windows are fixed to genomic coordinate")
+		("length,l", po::value<size_t>(&length)->default_value(1e6), "expected length of the values array")
 	;
 	popts.add("input", 1);
 
@@ -253,7 +332,7 @@ int main(int argc, char *argv[]) {
 
 	// read and write data
 
-	vcf::Reader reader(window, length);
+	vcf::Reader reader(window, fixed_window, length);
 	reader.read(input_fname);
 
 	if (output_fname.size() > 0) {
