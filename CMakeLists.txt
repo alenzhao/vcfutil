@@ -1,5 +1,7 @@
 project(exdepth)
 
+cmake_minimum_required(VERSION 2.8)
+
 find_package(Boost REQUIRED)
 
 include_directories(${BOOST_INCLUDES})
