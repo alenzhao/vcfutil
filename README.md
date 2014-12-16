@@ -11,8 +11,8 @@ Derive raw copy-number estimates from VCF file.
 ### Build ###
 
     mkdir build
-		cmake ..
-		make
+    cmake ..
+    make
 
 ### Usage ###
 
